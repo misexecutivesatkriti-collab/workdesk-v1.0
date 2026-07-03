@@ -8,34 +8,31 @@ router.use(authMiddleware);
 
 router.get('/', async (req, res) => {
   const { data, error } = await supabase
-    .from('admins').select('id, name, username, email, is_main, permissions, created_at')
-    .order('is_main', { ascending: false });
+    .from('workdesk_admins').select('id, name, username, email, role, perms, created_at')
+    .order('created_at', { ascending: false });
   if (error) return res.status(500).json({ error: error.message });
   res.json(data);
 });
 
 router.post('/', async (req, res) => {
-  if (!req.user.is_main) return res.status(403).json({ error: 'Main admin only' });
-  const { name, username, password, email, permissions } = req.body;
+  const { name, username, password, email, role, perms } = req.body;
   const hash = bcrypt.hashSync(password, 10);
-  const { data, error } = await supabase.from('admins').insert({
-    name: name || username, username, password: hash, email, permissions: permissions || {}
+  const { data, error } = await supabase.from('workdesk_admins').insert({
+    name: name || username, username, password: hash, email, role: role || 'admin', perms: perms || []
   }).select().single();
   if (error) return res.status(500).json({ error: error.message });
   res.json({ id: data.id });
 });
 
 router.put('/:id/permissions', async (req, res) => {
-  if (!req.user.is_main) return res.status(403).json({ error: 'Main admin only' });
-  const { permissions } = req.body;
-  const { error } = await supabase.from('admins').update({ permissions }).eq('id', req.params.id).eq('is_main', false);
+  const { perms } = req.body;
+  const { error } = await supabase.from('workdesk_admins').update({ perms }).eq('id', req.params.id);
   if (error) return res.status(500).json({ error: error.message });
   res.json({ success: true });
 });
 
 router.delete('/:id', async (req, res) => {
-  if (!req.user.is_main) return res.status(403).json({ error: 'Main admin only' });
-  await supabase.from('admins').delete().eq('id', req.params.id).eq('is_main', false);
+  await supabase.from('workdesk_admins').delete().eq('id', req.params.id);
   res.json({ success: true });
 });
 

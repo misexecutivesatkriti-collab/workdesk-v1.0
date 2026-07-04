@@ -255,6 +255,58 @@ ALTER TABLE workdesk_notices        ENABLE ROW LEVEL SECURITY;
 ALTER TABLE email_config            ENABLE ROW LEVEL SECURITY;
 
 -- ============================================================
+-- RLS POLICIES FOR ANON ROLE
+-- App uses the ANON key (public) from the browser.
+-- For an internal workdesk app with no end-user sign-up,
+-- we allow the anon role full CRUD on all data tables.
+-- This mirrors the previous service-role behaviour.
+-- ============================================================
+
+-- Departments
+CREATE POLICY "Allow anon full access departments" ON workdesk_departments
+  FOR ALL TO anon USING (true) WITH CHECK (true);
+
+-- Employees
+CREATE POLICY "Allow anon full access employees" ON workdesk_employees
+  FOR ALL TO anon USING (true) WITH CHECK (true);
+
+-- Admins
+CREATE POLICY "Allow anon full access admins" ON workdesk_admins
+  FOR ALL TO anon USING (true) WITH CHECK (true);
+
+-- Tasks
+CREATE POLICY "Allow anon full access tasks" ON workdesk_tasks
+  FOR ALL TO anon USING (true) WITH CHECK (true);
+
+-- Issues
+CREATE POLICY "Allow anon full access issues" ON workdesk_issues
+  FOR ALL TO anon USING (true) WITH CHECK (true);
+
+-- Handovers
+CREATE POLICY "Allow anon full access handovers" ON workdesk_handovers
+  FOR ALL TO anon USING (true) WITH CHECK (true);
+
+-- Delegations
+CREATE POLICY "Allow anon full access delegations" ON workdesk_delegations
+  FOR ALL TO anon USING (true) WITH CHECK (true);
+
+-- Activity Log
+CREATE POLICY "Allow anon full access activity_log" ON workdesk_activity_log
+  FOR ALL TO anon USING (true) WITH CHECK (true);
+
+-- Trash
+CREATE POLICY "Allow anon full access trash" ON workdesk_trash
+  FOR ALL TO anon USING (true) WITH CHECK (true);
+
+-- User Links
+CREATE POLICY "Allow anon full access user_links" ON workdesk_user_links
+  FOR ALL TO anon USING (true) WITH CHECK (true);
+
+-- Notices
+CREATE POLICY "Allow anon full access notices" ON workdesk_notices
+  FOR ALL TO anon USING (true) WITH CHECK (true);
+
+-- ============================================================
 -- DATA MIGRATION — copy rows from legacy tables, then drop them.
 -- Safe to re-run: COPY only fills empty rows; DROP is idempotent.
 -- ============================================================

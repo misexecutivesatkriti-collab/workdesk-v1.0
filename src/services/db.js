@@ -291,12 +291,40 @@ export function setupRealtime(onUpdate) {
     workdesk_activity_log: 'workdesk-actlog',
   };
   const tables = Object.keys(TABLE_TO_KEY);
-  const channels = tables.map((tbl) =>
-    supabase.channel('rt-' + tbl)
+  const channels = [];
+
+  tables.forEach((tbl) => {
+    const channel = supabase.channel('rt-' + tbl)
       .on('postgres_changes', { event: '*', schema: 'public', table: tbl }, () => {
-        onUpdate(TABLE_TO_KEY[tbl]);
+        try {
+          onUpdate(TABLE_TO_KEY[tbl]);
+        } catch (e) {
+          console.error('[realtime] Handler error for', tbl, ':', e);
+        }
       })
-      .subscribe()
-  );
-  return () => channels.forEach((c) => supabase.removeChannel(c));
+      .on('channel_error', (err) => {
+        console.error('[realtime] Channel error for', tbl, ':', err);
+      });
+
+    // Subscribe and handle errors
+    channel.subscribe().catch((err) => {
+      console.error('[realtime] Failed to subscribe to channel:', tbl, err);
+    });
+
+    channels.push(channel);
+  });
+
+  return () => {
+    try {
+      channels.forEach((c) => {
+        try {
+          supabase.removeChannel(c);
+        } catch (e) {
+          console.warn('[realtime] Error removing channel:', e.message);
+        }
+      });
+    } catch (e) {
+      console.error('[realtime] Error during cleanup:', e);
+    }
+  };
 }

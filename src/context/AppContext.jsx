@@ -272,120 +272,129 @@ export function AppProvider({ children }) {
 
   // Realtime subscription
   useEffect(() => {
-    const cleanup = setupRealtime(async (key) => {
-      const fresh = await loadAll(key);
-      const stateKey = KEY_MAP[key];
-      if (!stateKey) return;
+    const cleanup = setupRealtime((key) => {
+      // Wrap async operations inside IIFE - DON'T make callback async
+      // This prevents "message channel closed" errors when the Promise doesn't resolve
+      // before the channel closes
+      (async () => {
+        try {
+          const fresh = await loadAll(key);
+          const stateKey = KEY_MAP[key];
+          if (!stateKey) return;
 
-      // Preserve any locally-written rows that Supabase hasn't echoed back yet.
-      // This guards against the realtime event firing before the new row is
-      // visible to subsequent reads — without this, an in-flight task would be
-      // wiped out the moment realtime fired.
-      const lastWrite = ls.get('workdesk-last-local-write', null);
-      // When we have a recent local write to THIS key, prefer LS over fresh
-      // entirely. Supabase can take 100ms+ to echo an upsert back through
-      // realtime — if a realtime event fires in that window, `fresh` would
-      // contain STALE rows (the pre-update version), and dispatching it
-      // would clobber our correct local state with old data.
-      //
-      // We use a generous 8s window because Supabase realtime can lag,
-      // especially over slow networks, and during that window we know LS
-      // is the source of truth (the user just wrote it).
-      const recentWriteCutoff = Date.now() - 8000;
-      const recentLocalWrite = lastWrite && lastWrite.key === key && lastWrite.at >= recentWriteCutoff;
-      // DEBUG: trace realtime events on tasks to catch reverts
-      if (key === 'workdesk-tasks') {
-        const freshBreakdown = fresh.reduce((acc, r) => { acc[r.status || 'pending'] = (acc[r.status || 'pending'] || 0) + 1; return acc; }, {});
-        console.log(`[realtime] workdesk-tasks event: recentLocalWrite=${recentLocalWrite}, fresh breakdown:`, freshBreakdown);
-      }
-      let merged;
-      if (recentLocalWrite) {
-        // Trust LS entirely — Supabase's fresh snapshot may still have
-        // pre-update rows. Dispatch LS as-is (already up to date).
-        merged = ls.get(key, []);
-      } else {
-        const freshIds = new Set(fresh.map((x) => x.id));
-        // ─── Defense-in-depth: per-row newer-LS-wins ────────────────────────
-        // When the same row id exists in BOTH fresh and LS, prefer the row
-        // with the newer updatedAt. Without this, if Supabase silently lost
-        // a write (returned success but DB unchanged), a subsequent realtime
-        // event would fetch stale SB data and clobber our correct LS state.
-        const tsOf = (r) => {
-          const raw = r.updatedAt || r.updated_at || r.createdAt || r.created_at || 0;
-          return typeof raw === 'number' ? raw : new Date(raw).getTime() || 0;
-        };
-        const lsById = {};
-        ls.get(key, []).forEach((r) => { if (r && r.id) lsById[r.id] = r; });
-        const overrideLsIds = new Set();
-        const resolvedFresh = fresh.map((fRow) => {
-          const lsRow = lsById[fRow.id];
-          if (!lsRow) return fRow;
-          const lsTs = tsOf(lsRow);
-          const fTs = tsOf(fRow);
-          if (Number.isFinite(lsTs) && Number.isFinite(fTs) && lsTs > fTs) {
-            overrideLsIds.add(fRow.id);
-            return lsRow;
+          // Preserve any locally-written rows that Supabase hasn't echoed back yet.
+          // This guards against the realtime event firing before the new row is
+          // visible to subsequent reads — without this, an in-flight task would be
+          // wiped out the moment realtime fired.
+          const lastWrite = ls.get('workdesk-last-local-write', null);
+          // When we have a recent local write to THIS key, prefer LS over fresh
+          // entirely. Supabase can take 100ms+ to echo an upsert back through
+          // realtime — if a realtime event fires in that window, `fresh` would
+          // contain STALE rows (the pre-update version), and dispatching it
+          // would clobber our correct local state with old data.
+          //
+          // We use a generous 8s window because Supabase realtime can lag,
+          // especially over slow networks, and during that window we know LS
+          // is the source of truth (the user just wrote it).
+          const recentWriteCutoff = Date.now() - 8000;
+          const recentLocalWrite = lastWrite && lastWrite.key === key && lastWrite.at >= recentWriteCutoff;
+          // DEBUG: trace realtime events on tasks to catch reverts
+          if (key === 'workdesk-tasks') {
+            const freshBreakdown = fresh.reduce((acc, r) => { acc[r.status || 'pending'] = (acc[r.status || 'pending'] || 0) + 1; return acc; }, {});
+            console.log(`[realtime] workdesk-tasks event: recentLocalWrite=${recentLocalWrite}, fresh breakdown:`, freshBreakdown);
           }
-          return fRow;
-        });
-        merged = resolvedFresh;
-        if (key === 'workdesk-tasks' && overrideLsIds.size) {
-          console.log(`[realtime] ⚠️ ${overrideLsIds.size} task(s) overridden from LS (LS newer than SB):`, [...overrideLsIds]);
-        }
-      }
-      // Strip recently-deleted IDs from the fresh payload when LS isn't already
-      // canonical. Without this, an in-flight realtime event firing AFTER LS
-      // was updated but BEFORE the Supabase delete completes would dispatch
-      // stale state containing the just-deleted row (resurrecting it in the UI).
-      //
-      // BUG FIX: previously this was gated on `merged !== fresh` which was
-      // always FALSE when localPending was empty (merged IS fresh by reference).
-      // That meant the strip never ran on the most common path — no local
-      // pending writes, just a delete. The deleted row stayed in `fresh` from
-      // Supabase and got dispatched, resurrecting it in the UI.
-      //
-      // NOTE: with the newer-LS-wins fix above, `merged` is built from
-      // `resolvedFresh` (a fresh.map(...) output) or a spread of it, so
-      // `merged !== fresh` is always true now. We still splice from both
-      // to be defensive — `fresh` may be referenced by `loadAll` callers.
-      const recentDeletes = ls.get('workdesk-recent-deletes', []);
-      const deleteCutoff = Date.now() - 5 * 60 * 1000;
-      if (!recentLocalWrite && recentDeletes.length) {
-        // Build a fast lookup for this key's pending deletes within the window.
-        const deletedIds = new Set(
-          recentDeletes
-            .filter((d) => d.key === key && d.at >= deleteCutoff)
-            .map((d) => d.id)
-        );
-        if (deletedIds.size > 0) {
-          for (let i = fresh.length - 1; i >= 0; i--) {
-            if (deletedIds.has(fresh[i].id)) fresh.splice(i, 1);
+          let merged;
+          if (recentLocalWrite) {
+            // Trust LS entirely — Supabase's fresh snapshot may still have
+            // pre-update rows. Dispatch LS as-is (already up to date).
+            merged = ls.get(key, []);
+          } else {
+            const freshIds = new Set(fresh.map((x) => x.id));
+            // ─── Defense-in-depth: per-row newer-LS-wins ────────────────────────
+            // When the same row id exists in BOTH fresh and LS, prefer the row
+            // with the newer updatedAt. Without this, if Supabase silently lost
+            // a write (returned success but DB unchanged), a subsequent realtime
+            // event would fetch stale SB data and clobber our correct LS state.
+            const tsOf = (r) => {
+              const raw = r.updatedAt || r.updated_at || r.createdAt || r.created_at || 0;
+              return typeof raw === 'number' ? raw : new Date(raw).getTime() || 0;
+            };
+            const lsById = {};
+            ls.get(key, []).forEach((r) => { if (r && r.id) lsById[r.id] = r; });
+            const overrideLsIds = new Set();
+            const resolvedFresh = fresh.map((fRow) => {
+              const lsRow = lsById[fRow.id];
+              if (!lsRow) return fRow;
+              const lsTs = tsOf(lsRow);
+              const fTs = tsOf(fRow);
+              if (Number.isFinite(lsTs) && Number.isFinite(fTs) && lsTs > fTs) {
+                overrideLsIds.add(fRow.id);
+                return lsRow;
+              }
+              return fRow;
+            });
+            merged = resolvedFresh;
+            if (key === 'workdesk-tasks' && overrideLsIds.size) {
+              console.log(`[realtime] ⚠️ ${overrideLsIds.size} task(s) overridden from LS (LS newer than SB):`, [...overrideLsIds]);
+            }
           }
-          for (let i = merged.length - 1; i >= 0; i--) {
-            if (deletedIds.has(merged[i].id)) merged.splice(i, 1);
+          // Strip recently-deleted IDs from the fresh payload when LS isn't already
+          // canonical. Without this, an in-flight realtime event firing AFTER LS
+          // was updated but BEFORE the Supabase delete completes would dispatch
+          // stale state containing the just-deleted row (resurrecting it in the UI).
+          //
+          // BUG FIX: previously this was gated on `merged !== fresh` which was
+          // always FALSE when localPending was empty (merged IS fresh by reference).
+          // That meant the strip never ran on the most common path — no local
+          // pending writes, just a delete. The deleted row stayed in `fresh` from
+          // Supabase and got dispatched, resurrecting it in the UI.
+          //
+          // NOTE: with the newer-LS-wins fix above, `merged` is built from
+          // `resolvedFresh` (a fresh.map(...) output) or a spread of it, so
+          // `merged !== fresh` is always true now. We still splice from both
+          // to be defensive — `fresh` may be referenced by `loadAll` callers.
+          const recentDeletes = ls.get('workdesk-recent-deletes', []);
+          const deleteCutoff = Date.now() - 5 * 60 * 1000;
+          if (!recentLocalWrite && recentDeletes.length) {
+            // Build a fast lookup for this key's pending deletes within the window.
+            const deletedIds = new Set(
+              recentDeletes
+                .filter((d) => d.key === key && d.at >= deleteCutoff)
+                .map((d) => d.id)
+            );
+            if (deletedIds.size > 0) {
+              for (let i = fresh.length - 1; i >= 0; i--) {
+                if (deletedIds.has(fresh[i].id)) fresh.splice(i, 1);
+              }
+              for (let i = merged.length - 1; i >= 0; i--) {
+                if (deletedIds.has(merged[i].id)) merged.splice(i, 1);
+              }
+            }
           }
-        }
-      }
 
-      if (key === 'workdesk-tasks' && !recentLocalWrite && !recentDeletes.length) {
-        // Always apply autoCycle on fresh Supabase data so cycled tasks survive realtime refreshes.
-        // Skip during a recent local write OR recent delete — both situations
-        // mean the user just mutated the data, and autoCycle could create
-        // spurious "new task assigned" cycles that the user perceives as
-        // notifications triggered by their delete action.
-        const cycled = autoCycleTasks(merged);
-        if (cycled.length) {
-          const withCycles = [...merged, ...cycled];
-          ls.set(key, withCycles);
-          dispatch({ type: 'SET_KEY', key: stateKey, value: withCycles });
-          upsertRecord(key, cycled); // persist cycles to Supabase (triggers realtime again, but autoCycle is idempotent)
-          return;
-        }
-      }
+          if (key === 'workdesk-tasks' && !recentLocalWrite && !recentDeletes.length) {
+            // Always apply autoCycle on fresh Supabase data so cycled tasks survive realtime refreshes.
+            // Skip during a recent local write OR recent delete — both situations
+            // mean the user just mutated the data, and autoCycle could create
+            // spurious "new task assigned" cycles that the user perceives as
+            // notifications triggered by their delete action.
+            const cycled = autoCycleTasks(merged);
+            if (cycled.length) {
+              const withCycles = [...merged, ...cycled];
+              ls.set(key, withCycles);
+              dispatch({ type: 'SET_KEY', key: stateKey, value: withCycles });
+              upsertRecord(key, cycled); // persist cycles to Supabase (triggers realtime again, but autoCycle is idempotent)
+              return;
+            }
+          }
 
-      ls.set(key, merged);
-      dispatch({ type: 'SET_KEY', key: stateKey, value: merged });
-      if (key === 'workdesk-employees') refreshPermsFromEmployees(merged);
+          ls.set(key, merged);
+          dispatch({ type: 'SET_KEY', key: stateKey, value: merged });
+          if (key === 'workdesk-employees') refreshPermsFromEmployees(merged);
+        } catch (e) {
+          console.error('[realtime] Failed to handle update for', key, ':', e);
+        }
+      })();
     });
     return cleanup;
   }, [refreshPermsFromEmployees]);

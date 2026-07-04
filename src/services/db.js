@@ -294,7 +294,10 @@ export function setupRealtime(onUpdate) {
   const channels = [];
 
   tables.forEach((tbl) => {
-    const channel = supabase.channel('rt-' + tbl)
+    const channel = supabase.channel('rt-' + tbl);
+
+    // Add event handlers BEFORE subscribing
+    channel
       .on('postgres_changes', { event: '*', schema: 'public', table: tbl }, () => {
         try {
           onUpdate(TABLE_TO_KEY[tbl]);
@@ -306,9 +309,17 @@ export function setupRealtime(onUpdate) {
         console.error('[realtime] Channel error for', tbl, ':', err);
       });
 
-    // Subscribe and handle errors
-    channel.subscribe().catch((err) => {
-      console.error('[realtime] Failed to subscribe to channel:', tbl, err);
+    // Subscribe after adding handlers
+    channel.subscribe((status) => {
+      if (status === 'SUBSCRIBED') {
+        console.log('[realtime] Successfully subscribed to channel:', tbl);
+      } else if (status === 'CHANNEL_ERROR') {
+        console.error('[realtime] Channel subscription error for', tbl);
+      } else if (status === 'TIMED_OUT') {
+        console.error('[realtime] Channel subscription timed out for', tbl);
+      } else if (status === 'CLOSED') {
+        console.log('[realtime] Channel closed for', tbl);
+      }
     });
 
     channels.push(channel);
